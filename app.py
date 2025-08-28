@@ -4,9 +4,10 @@ import numpy as np
 from io import BytesIO
 
 def main():
-    st.title("📊 Sistema de Alocação de Demandas e Capacidades Variáveis")
+    st.title("📊 Sistema de Alocação de Demanda e Capacidade")
     st.markdown("""
-    Esta aplicação realiza a alocação ótima de demanda não atendida para capacidade ociosa, considerando:
+    Esta aplicação realiza a alocação ótima de demanda não atendida para capacidade ociosa, 
+    considerando:
     - Prioridade de auto-atendimento
     - Restrição de grupo (opcional)
     - Mínimo de alocação em capacidade ociosa
@@ -22,8 +23,9 @@ def main():
             df = pd.read_excel(uploaded_file)
         st.success(f"Dados carregados com sucesso! ({uploaded_file.name})")
     else:
-        st.info("Use o formato padrão: grupo, capacidade_instalada, demanda")
+        st.info("Use o formato padrão: identificador, grupo, capacidade_instalada, demanda")
         sample_data = {
+            'identificador': ['CAP001', 'CAP002', 'CAP003', 'CAP004', 'CAP005', 'CAP006', 'CAP007'],
             'grupo': ['A', 'A', 'B', 'B', 'C', 'C', 'D'],
             'capacidade_instalada': [100, 150, 200, 50, 300, 120, 80],
             'demanda': [120, 100, 180, 100, 250, 150, 100]
@@ -35,7 +37,7 @@ def main():
     st.dataframe(df)
     
     # Verificar colunas
-    required_columns = {'grupo', 'capacidade_instalada', 'demanda'}
+    required_columns = {'identificador', 'grupo', 'capacidade_instalada', 'demanda'}
     if not required_columns.issubset(df.columns):
         st.error(f"Colunas necessárias não encontradas. Requeridas: {', '.join(required_columns)}")
         st.stop()
@@ -57,8 +59,6 @@ def main():
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             resultado['df_final'].to_excel(writer, sheet_name='Resultado', index=False)
-            if not resultado['alocacoes_df'].empty:
-                resultado['alocacoes_df'].to_excel(writer, sheet_name='Alocações', index=False)
         output.seek(0)
         
         st.download_button(
@@ -68,24 +68,18 @@ def main():
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
-        st.subheader("🔀 Alocações Realizadas")
-        if resultado['alocacoes_df'].empty:
-            st.info("Nenhuma alocação foi realizada entre unidades")
-        else:
-            st.dataframe(resultado['alocacoes_df'])
-        
         st.subheader("📈 Resumo da Otimização")
         resumo = resultado['resumo']
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Demanda não atendida inicial", resumo['demanda_na_inicial'])
         col2.metric("Demanda não atendida final", resumo['demanda_na_final'])
-        col3.metric("Demanda alocada", resumo['demanda_alocada'])
+        col3.metric("Eficiência", f"{resumo['eficiencia']:.1f}%")
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Capacidade ociosa inicial", resumo['capacidade_ociosa_inicial'])
         col2.metric("Capacidade ociosa final", resumo['capacidade_ociosa_final'])
-        col3.metric("Eficiência", f"{resumo['taxa_utilizacao']:.1f}%")
+        col3.metric("Demanda alocada externamente", resumo['demanda_alocada'])
 
 def calcular_alocacao(df, mesmo_grupo, min_alocacao):
     # Cópia do DataFrame para cálculos
@@ -96,8 +90,10 @@ def calcular_alocacao(df, mesmo_grupo, min_alocacao):
     df['demanda_na'] = df['demanda'] - df['demanda_atendida_local']
     df['capacidade_ociosa'] = df['capacidade_instalada'] - df['demanda_atendida_local']
     
+    # Inicializar coluna de detalhes de alocação
+    df['demanda_atendida_por'] = ""
+    
     # Preparar estruturas para alocação
-    alocacoes = []
     unidades = df.to_dict('records')
     
     # Identificar origens (demanda não atendida) e destinos (capacidade ociosa)
@@ -108,6 +104,9 @@ def calcular_alocacao(df, mesmo_grupo, min_alocacao):
     origens.sort(key=lambda x: x['demanda_na'], reverse=True)
     destinos.sort(key=lambda x: x['capacidade_ociosa'], reverse=True)
     
+    # Dicionário para rastrear alocações
+    alocacoes_detalhadas = {unidade['identificador']: [] for unidade in unidades}
+    
     # Fase 2: Alocar demanda não atendida
     for origem in origens:
         if origem['demanda_na'] < min_alocacao:
@@ -115,7 +114,7 @@ def calcular_alocacao(df, mesmo_grupo, min_alocacao):
             
         for destino in destinos:
             # Verificar se é a mesma unidade ou capacidade insuficiente
-            if origem is destino or destino['capacidade_ociosa'] < min_alocacao:
+            if origem['identificador'] == destino['identificador'] or destino['capacidade_ociosa'] < min_alocacao:
                 continue
                 
             # Verificar restrição de grupo
@@ -133,17 +132,26 @@ def calcular_alocacao(df, mesmo_grupo, min_alocacao):
             origem['demanda_na'] -= qtd_alocada
             destino['capacidade_ociosa'] -= qtd_alocada
             
-            # Registrar alocação
-            alocacoes.append({
-                'origem_grupo': origem['grupo'],
-                'destino_grupo': destino['grupo'],
-                'quantidade_alocada': qtd_alocada,
-                'minimo_atendido': 'Sim'
+            # Registrar alocação detalhada
+            alocacoes_detalhadas[origem['identificador']].append({
+                'destino': destino['identificador'],
+                'quantidade': qtd_alocada
             })
             
             # Parar se demanda totalmente alocada
             if origem['demanda_na'] < min_alocacao:
                 break
+    
+    # Formatar detalhes de alocação
+    for unidade in unidades:
+        alocacoes = alocacoes_detalhadas[unidade['identificador']]
+        if alocacoes:
+            detalhes = []
+            for aloc in alocacoes:
+                detalhes.append(f"{aloc['destino']} ({aloc['quantidade']})")
+            unidade['demanda_atendida_por'] = "; ".join(detalhes)
+        else:
+            unidade['demanda_atendida_por'] = "Auto-atendimento"
     
     # Atualizar DataFrame final
     df_final = pd.DataFrame(unidades)
@@ -156,24 +164,27 @@ def calcular_alocacao(df, mesmo_grupo, min_alocacao):
     demanda_na_final = df_final['demanda_na_final'].sum()
     capacidade_ociosa_inicial = df['capacidade_ociosa'].sum()
     capacidade_ociosa_final = df_final['capacidade_ociosa_final'].sum()
+    demanda_alocada = sum(len(aloc) > 0 for aloc in alocacoes_detalhadas.values())
+    
+    # Nova eficiência: demanda alocada / demanda não atendida inicial
+    if demanda_na_inicial > 0:
+        eficiencia = ((demanda_na_inicial - demanda_na_final) / demanda_na_inicial) * 100
+    else:
+        eficiencia = 100.0  # Se não havia demanda não atendida, eficiência é 100%
     
     resumo = {
         'demanda_na_inicial': demanda_na_inicial,
         'demanda_na_final': demanda_na_final,
         'capacidade_ociosa_inicial': capacidade_ociosa_inicial,
         'capacidade_ociosa_final': capacidade_ociosa_final,
-        'demanda_alocada': sum(a['quantidade_alocada'] for a in alocacoes),
-        'taxa_utilizacao': (df_final['demanda_atendida_total'].sum() / df_final['capacidade_instalada'].sum() * 100) if df_final['capacidade_instalada'].sum() > 0 else 0
+        'demanda_alocada': demanda_na_inicial - demanda_na_final,
+        'eficiencia': eficiencia
     }
     
-    # DataFrame de alocações
-    alocacoes_df = pd.DataFrame(alocacoes) if alocacoes else pd.DataFrame()
-    
     return {
-        'df_final': df_final[['grupo', 'capacidade_instalada', 'demanda', 
+        'df_final': df_final[['identificador', 'grupo', 'capacidade_instalada', 'demanda', 
                               'demanda_atendida_local', 'demanda_na_final', 
-                              'capacidade_ociosa_final', 'demanda_atendida_total']],
-        'alocacoes_df': alocacoes_df,
+                              'capacidade_ociosa_final', 'demanda_atendida_por']],
         'resumo': resumo
     }
 
